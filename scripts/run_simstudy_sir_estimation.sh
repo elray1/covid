@@ -1,3 +1,3 @@
 #!/bin/bash
 
-python run_sir.py "$@"
+python run_simstudy_sir_estimation.py "$@"

@@ -3,7 +3,7 @@
 
 root=results
 start='2020-03-15'
-configs="SEIRD SEIRD_variable_detection"
+configs="SEIRD_incident"
 #forecast_dates="2020-04-04 2020-04-11  2020-04-18 2020-04-25"   # validation
 forecast_dates="2020-05-03" # this week's submission
 
