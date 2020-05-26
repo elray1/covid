@@ -39,9 +39,9 @@ def load_world_data():
     world_pop_data = pd.read_csv('https://s3.amazonaws.com/rawstore.datahub.io/630580e802a621887384f99527b68f59.csv')
     world_pop_data = world_pop_data.set_index("Country")
         
-    country_names_valid = set(country_names) & set(world_pop_data.index) 
+    country_names_valid = set(country_names) & set(world_pop_data.index)
     world_data = {
-        k: {'data' : world[k].tot, 
+        k: {'data' : world[k].tot,
             'pop' : world_pop_data.loc[k]['Year_2016'],
             'name' : k}
         for k in country_names_valid
@@ -64,7 +64,7 @@ def load_state_data(source="jhu"):
     state_set = set(traits.index) & set(US.columns.unique(level=0))
 
     state_data = {
-        k : {'data': US[k], 
+        k : {'data': US[k],
              'pop': traits.totalpop[k],
              'name': traits.NAME[k]
             }
@@ -141,8 +141,8 @@ Running
 ************************************************************
 """
 
-def run_place(data, 
-              place, 
+def run_place(data,
+              place,
               model_type=covid.models.SEIRD.SEIRD,
               start = '2020-03-04',
               end = None,
@@ -150,7 +150,7 @@ def run_place(data,
               num_warmup = 1000,
               num_samples = 1000,
               num_chains = 1,
-              num_prior_samples = 0,              
+              num_prior_samples = 0,
               T_future=4*7,
               prefix = "results",
               **kwargs):
@@ -169,7 +169,7 @@ def run_place(data,
     )
     
     print(" * running MCMC")
-    mcmc_samples = model.infer(num_warmup=num_warmup, 
+    mcmc_samples = model.infer(num_warmup=num_warmup,
                                num_samples=num_samples)
 
     # Prior samples
@@ -195,7 +195,7 @@ def run_place(data,
         
         save_samples(filename,
                      prior_samples,
-                     mcmc_samples, 
+                     mcmc_samples,
                      post_pred_samples,
                      forecast_samples)
         
@@ -206,15 +206,15 @@ def run_place(data,
         write_summary(filename, model.mcmc)
 
         
-def save_samples(filename, 
+def save_samples(filename,
                  prior_samples,
-                 mcmc_samples, 
+                 mcmc_samples,
                  post_pred_samples,
                  forecast_samples):
     
-    np.savez(filename, 
+    np.savez(filename,
              prior_samples = prior_samples,
-             mcmc_samples = mcmc_samples, 
+             mcmc_samples = mcmc_samples,
              post_pred_samples = post_pred_samples,
              forecast_samples = forecast_samples)
 
@@ -240,13 +240,45 @@ def load_samples(filename):
     return prior_samples, mcmc_samples, post_pred_samples, forecast_samples
 
 
-def gen_forecasts(data, 
-                  place, 
+def forecast_place_fixed_param(data,
+                               place,
+                               model_type=covid.models.SEIRD.SEIRD,
+                               start = '2020-03-04',
+                               end = None,
+                               save = True,
+                               num_samples = 1000,
+                               T_future=4*7,
+                               prefix = "results",
+                               fixed_param = None,
+                               **kwargs):
+    if fixed_param is None:
+        raise ValueError('must provide dict of parameter values')
+    
+    place_data = data[place]['data'][start:end]
+    T = len(place_data)
+
+    model = model_type(
+        data = place_data,
+        T = T,
+        N = data[place]['pop'],
+        **kwargs
+    )
+    
+    predictive = Predictive(model,
+                            posterior_samples=fixed_param,
+                            num_samples=num_samples)
+
+    args = dict(model.args, **args)
+    return predictive(rng_key=PRNGKey(4), **model.obs, **args)
+
+
+def gen_forecasts(data,
+                  place,
                   model_type=covid.models.SEIRD.SEIRD,
-                  start = '2020-03-04', 
+                  start = '2020-03-04',
                   end=None,
                   save = True,
-                  show = True, 
+                  show = True,
                   prefix='results',
                   **kwargs):
     
@@ -264,14 +296,14 @@ def gen_forecasts(data,
     T = len(confirmed)
     N = data[place]['pop']
 
-    filename = samples_path / f'{place}.npz'   
+    filename = samples_path / f'{place}.npz'
     _, mcmc_samples, post_pred_samples, forecast_samples = load_samples(filename)
         
     for daily in [False, True]:
         for scale in ['log', 'lin']:
             for T in [14, 28]:
 
-                fig, axes = plt.subplots(nrows = 2, figsize=(8,12), sharex=True)    
+                fig, axes = plt.subplots(nrows = 2, figsize=(8,12), sharex=True)
 
                 if daily:
                     variables = ['dy', 'dz']
@@ -301,7 +333,7 @@ def gen_forecasts(data,
                 if show:
                     plt.show()
             
-    fig = plot_R0(mcmc_samples, start)    
+    fig = plot_R0(mcmc_samples, start)
     plt.title(place)
     plt.tight_layout()
     
@@ -310,7 +342,7 @@ def gen_forecasts(data,
         plt.savefig(filename)
 
     if show:
-        plt.show()   
+        plt.show()
         
         
         
@@ -328,7 +360,7 @@ def score_forecasts(start,
     prior_samples, mcmc_samples, post_pred_samples, forecast_samples = \
         load_samples(filename)
 
-    # cumulative deaths 
+    # cumulative deaths
     death = data[place]['data'][start:eval_date].death
     end = death.index.max()
 
@@ -348,7 +380,7 @@ def score_forecasts(start,
           (round(df.loc[index,:]) > (round(obs.loc[index]) - 100))))
 
           err = np.mean(np.clip(np.log(np.array(ls)),-10))
-          #err_plot = err.plot(style='0')     
+          #err_plot = err.plot(style='0')
     else:
          point_forecast = df.median(axis=1)
          
