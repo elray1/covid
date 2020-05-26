@@ -22,6 +22,15 @@ from pathlib import Path
 
 import cachetools
 
+import scipy
+import scipy.stats
+
+from .compartment import SEIRModel
+
+from tqdm import tqdm
+
+import warnings
+
 
 """
 ************************************************************
@@ -40,6 +49,7 @@ def load_world_data():
     world_pop_data = world_pop_data.set_index("Country")
         
     country_names_valid = set(country_names) & set(world_pop_data.index)
+    
     world_data = {
         k: {'data' : world[k].tot,
             'pop' : world_pop_data.loc[k]['Year_2016'],
@@ -47,7 +57,8 @@ def load_world_data():
         for k in country_names_valid
     }
 
-    
+    world_data['US'] = {'pop': 328000000,'data':world['US'].tot,'name':'US'}
+      
     return world_data
 
 
@@ -112,11 +123,11 @@ Plotting
 ************************************************************
 """
     
-def plot_R0(mcmc_samples, start):
+def plot_R0(mcmc_samples, start, ax=None):
 
-    fig = plt.figure(figsize=(5,3))
+    ax = plt.axes(ax)
     
-    # Compute average R0 over time
+    # Compute R0 over time
     gamma = mcmc_samples['gamma'][:,None]
     beta = mcmc_samples['beta']
     t = pd.date_range(start=start, periods=beta.shape[1], freq='D')
@@ -124,15 +135,31 @@ def plot_R0(mcmc_samples, start):
 
     pi = np.percentile(R0, (10, 90), axis=0)
     df = pd.DataFrame(index=t, data={'R0': np.median(R0, axis=0)})
-    df.plot(style='-o')
-    plt.fill_between(t, pi[0,:], pi[1,:], alpha=0.1)
+    df.plot(style='-o', ax=ax)
+    ax.fill_between(t, pi[0,:], pi[1,:], alpha=0.1)
 
-    plt.axhline(1, linestyle='--')
+    ax.axhline(1, linestyle='--')
     
-    #plt.tight_layout()
 
-    return fig
+def plot_growth_rate(mcmc_samples, start, model=SEIRModel, ax=None):
+    
+    ax = plt.axes(ax)
 
+    # Compute growth rate over time
+    beta = mcmc_samples['beta']
+    sigma = mcmc_samples['sigma'][:,None]
+    gamma = mcmc_samples['gamma'][:,None]
+    t = pd.date_range(start=start, periods=beta.shape[1], freq='D')
+
+    growth_rate = SEIRModel.growth_rate((beta, sigma, gamma))
+
+    pi = np.percentile(growth_rate, (10, 90), axis=0)
+    df = pd.DataFrame(index=t, data={'growth_rate': np.median(growth_rate, axis=0)})
+    df.plot(style='-o', ax=ax)
+    ax.fill_between(t, pi[0,:], pi[1,:], alpha=0.1)
+
+    ax.axhline(0, linestyle='--')
+    
 
 
 """
@@ -153,11 +180,14 @@ def run_place(data,
               num_prior_samples = 0,
               T_future=4*7,
               prefix = "results",
+              resample_low=0,
+              resample_high=100,
               **kwargs):
 
 
+    numpyro.enable_x64()
+
     print(f"Running {place} (start={start}, end={end})")
-    
     place_data = data[place]['data'][start:end]
     T = len(place_data)
 
@@ -171,6 +201,10 @@ def run_place(data,
     print(" * running MCMC")
     mcmc_samples = model.infer(num_warmup=num_warmup,
                                num_samples=num_samples)
+
+    if resample_low > 0 or resample_high < 100:
+        print(" * resampling")
+        mcmc_samples = model.resample(low=resample_low, high=resample_high, **kwargs)
 
     # Prior samples
     prior_samples = None
@@ -332,8 +366,9 @@ def gen_forecasts(data,
 
                 if show:
                     plt.show()
-            
-    fig = plot_R0(mcmc_samples, start)
+    
+    fig, ax = plt.subplots(figsize=(5,4))
+    plot_growth_rate(mcmc_samples, start, ax=ax)
     plt.title(place)
     plt.tight_layout()
     
@@ -346,49 +381,133 @@ def gen_forecasts(data,
         
         
         
-def score_forecasts(start,
-                    place,
-                    data,
-                    prefix="results",
-                    model_type=covid.models.SEIRD.SEIRD,
-                    eval_date=None,
-                    method="mae"):
+"""
+************************************************************
+Performance metrics
+************************************************************
+"""
 
-    model = model_type()
+def score_place(forecast_date,
+                data,
+                place,
+                model_type=covid.models.SEIRD.SEIRD,
+                prefix="results"):
+
+    '''Gives performance metrics for each time horizon for one place'''
     
     filename = Path(prefix) / 'samples' / f'{place}.npz'
     prior_samples, mcmc_samples, post_pred_samples, forecast_samples = \
         load_samples(filename)
 
+    model = model_type()
+
+    start = pd.to_datetime(forecast_date) + pd.Timedelta("1d")
+
     # cumulative deaths
-    death = data[place]['data'][start:eval_date].death
-    end = death.index.max()
+    obs = data[place]['data'][start:].death
+    end = obs.index.max()
 
-    obs = death[start:]
+    # predicted deaths
+    z = model.get(forecast_samples, 'z', forecast=True)
+    
+    # truncate to smaller length
+    T = min(len(obs), z.shape[1])
+    z = z[:,:T]
+    obs = obs.iloc[:T]
+    
+    # create data frame for analysis
+    samples = pd.DataFrame(index=obs.index, data=z.T)
 
-    T = len(obs)
-    z = model.get(forecast_samples, 'z', forecast=True)[:,:T]
-    df = pd.DataFrame(index=obs.index, data=z.T)
- 
+    n_samples = samples.shape[1]
 
-    if method == "ls":
-         
-          ls = []
+    # Construct output data frame
+    scores = pd.DataFrame(index=obs.index)
+    scores['place'] = place
+    scores['forecast_date'] = pd.to_datetime(forecast_date)
+    scores['horizon'] = (scores.index - scores['forecast_date'])/pd.Timedelta("1d")
+    
+    # Compute MAE
+    point_forecast = samples.median(axis=1)
+    scores['err'] = obs-point_forecast
 
-          for index, row in df.iterrows():
-               ls.append(sum((round(df.loc[index,:]) < (round(obs.loc[index]) + 100) )&
-          (round(df.loc[index,:]) > (round(obs.loc[index]) - 100))))
+    # Compute log-score
+    within_100 = samples.sub(obs, axis=0).abs().lt(100)
+    prob = (within_100.sum(axis=1)/n_samples)
+    log_score = prob.apply(np.log).clip(lower=-10).rename('log score')
+    scores['log_score'] = log_score
 
-          err = np.mean(np.clip(np.log(np.array(ls)),-10))
-          #err_plot = err.plot(style='0')
-    else:
-         point_forecast = df.median(axis=1)
-         
-         errs = (obs-point_forecast).rename('errs')
+    # Compute quantile of observed value in samples
+    scores['quantile'] = samples.lt(obs, axis=0).sum(axis=1) / n_samples
+    
+    return scores
 
-         err = errs[eval_date] if eval_date is not None else errs.values[-1]
+def score_forecast(forecast_date,
+                   data,
+                   places=None,
+                   model_type=covid.models.SEIRD.SEIRD,
+                   prefix="results"):
 
-         #err_plot = err.plot(style='o')
-         #err = err.abs().mean()
+    if places is None:
+        places = list(data.keys())
+    # Assemble performance metrics each place and time horizon
+    details = pd.DataFrame()
+    
+    print(f'Scoring all places for {forecast_date} forecast')
+    
+    for place in tqdm(places):
+                
 
-    return err
+        try:
+            place_df = score_place(forecast_date,
+                                   data,
+                                   place,
+                                   model_type=model_type,
+                                   prefix=prefix)
+        except Exception as e:
+            warnings.warn(f'Could not score {place}')
+            print(e)
+        else:
+            details = details.append(place_df)
+
+        
+    # Now summarize over places for each time horizon
+    dates = details.index.unique()
+    summary = pd.DataFrame(index=dates)
+    
+    for date in dates:
+        
+        horizon = int((date-pd.to_datetime(forecast_date))/pd.Timedelta("1d"))
+        rows = details.loc[date]
+        
+        if len(places) > 1:
+            summary.loc[date, 'horizon'] = horizon
+
+        # Compute signer error / bias
+            summary.loc[date, 'signed_err'] = rows['err'].mean()
+        
+        # Compute MAE
+            summary.loc[date, 'MAE'] = rows['err'].abs().mean()
+        
+        # Compute avg. log-score
+            summary.loc[date, 'log_score'] = rows['log_score'].mean()
+        
+        # Compute KS statistic
+            ks, pval = scipy.stats.kstest(rows['quantile'], 'uniform')
+            summary.loc[date,'KS'] = ks
+            summary.loc[date,'KS_pval'] = pval
+
+        else:
+            summary.loc[date, 'horizon'] = horizon
+
+        # Compute signer error / bias
+            summary.loc[date, 'signed_err'] = rows['err']
+
+        # Compute MAE
+            summary.loc[date, 'MAE'] = rows['err']
+
+        # Compute avg. log-score
+            summary.loc[date, 'log_score'] = rows['log_score']
+        
+    summary['forecast_date'] = forecast_date
+    
+    return summary, details

@@ -10,6 +10,9 @@ import numpy as onp
 import pandas as pd
 import matplotlib.pyplot as plt
 
+import numpy as onp
+from covid.compartment import SEIRDModel
+
 
 '''Utility to define access method for time varying fields'''
 def getter(f):
@@ -37,7 +40,9 @@ class Model():
         'y': 'confirmed',
         'z': 'deaths',
         'dy': 'daily confirmed',
-        'dz': 'daily deaths'
+        'dz': 'daily deaths',
+        'mean_dy': 'daily confirmed (mean)',
+        'mean_dz': 'daily deaths (mean)'
     }
             
     
@@ -84,7 +89,7 @@ class Model():
     
     
     def prior(self, num_samples=1000, rng_key=PRNGKey(2), **args):
-        
+        '''Draw samples from prior'''
         predictive = Predictive(self, posterior_samples={}, num_samples=num_samples)        
         
         args = dict(self.args, **args) # passed args take precedence        
@@ -94,6 +99,7 @@ class Model():
     
     
     def predictive(self, rng_key=PRNGKey(3), **args):
+        '''Draw samples from in-sample predictive distribution'''
 
         if self.mcmc_samples is None:
             raise RuntimeError("run inference first")
@@ -105,6 +111,8 @@ class Model():
     
     
     def forecast(self, num_samples=1000, rng_key=PRNGKey(4), **args):
+        '''Draw samples from forecast predictive distribution'''
+
         if self.mcmc_samples is None:
             raise RuntimeError("run inference first")
 
@@ -113,6 +121,33 @@ class Model():
         args = dict(self.args, **args)
         return predictive(rng_key, **self.obs, **args)
         
+            
+    def resample(self, low=0, high=90, rw_use_last=1, **kwargs):
+        '''Resample MCMC samples by growth rate'''
+        
+        # TODO: hard-coded for SEIRDModel. Would also 
+        # work for SEIR, but not SIR
+        
+        beta = self.mcmc_samples['beta']
+        gamma = self.mcmc_samples['gamma']
+        sigma = self.mcmc_samples['sigma']
+        beta_end = beta[:,-rw_use_last:].mean(axis=1)
+
+        growth_rate = SEIRDModel.growth_rate((beta_end, sigma, gamma))
+        
+        low = int(low/100 * len(growth_rate))
+        high = int(high/100 * len(growth_rate))
+
+        sorted_inds = onp.argsort(growth_rate)
+        selection = onp.random.randint(low, high, size=(1000))
+        inds = sorted_inds[selection]
+
+        new_samples = {k: v[inds, ...] for k, v in self.mcmc_samples.items()}
+
+        self.mcmc_samples = new_samples
+        return new_samples
+
+    
     
     """
     ***************************************
@@ -150,11 +185,14 @@ class Model():
         
         
     '''These are methods e.g., call self.z(samples) to get z'''
-    z = getter('z')
-    y = getter('y')
+    #z = getter('z')
+    #y = getter('y')
     mean_y = getter('mean_y')
     mean_z = getter('mean_z')
 
+    z = mean_z
+    y = mean_y
+    
     # There are only available in some models but easier to define here
     dz = getter('dz')
     dy = getter('dy')
@@ -169,37 +207,53 @@ class Model():
                      T=None,
                      ax=None,          
                      legend=True,
-                     forecast=False):
+                     forecast=False,
+                     n_samples=0,
+                     intervals=[50, 80, 95]):
         '''
         Plotting method for SIR-type models. 
         '''
 
+        
         ax = plt.axes(ax)
 
         T_data = self.horizon(samples, forecast=forecast)        
         T = T_data if T is None else min(T, T_data) 
         
-        fields = {f: self.get(samples, f, forecast=forecast)[:,:T] for f in plot_fields}
+        fields = {f: 0.0 + self.get(samples, f, forecast=forecast)[:,:T] for f in plot_fields}
         names = {f: self.names[f] for f in plot_fields}
                 
-        medians = {names[f]: np.median(v, axis=0) for f, v in fields.items()}    
-        pred_intervals = {names[f]: np.percentile(v, (10, 90), axis=0) for f, v in fields.items()}
+        medians = {names[f]: np.median(v, axis=0) for f, v in fields.items()}
 
         t = pd.date_range(start=start, periods=T, freq='D')
 
         ax.set_prop_cycle(None)
+        colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
 
         # Plot medians
         df = pd.DataFrame(index=t, data=medians)
         df.plot(ax=ax, legend=legend)
         median_max = df.max().values
 
+        # Plot samples if requested
+        if n_samples > 0:
+            for i, f in enumerate(fields):
+                df = pd.DataFrame(index=t, data=fields[f][:n_samples,:].T)
+                df.plot(ax=ax, legend=False, alpha=0.1)
+                
         # Plot prediction intervals
         pi_max = 10
-        for pi in pred_intervals.values():
-            ax.fill_between(t, pi[0,:], pi[1,:], alpha=0.1, label='CI')
-            pi_max = np.maximum(pi_max, np.nanmax(pi[1,:]))
+        handles = []
+        for interval in intervals:
+            low=(100.-interval)/2
+            high=100.-low
+            pred_intervals = {names[f]: np.percentile(v, (low, high), axis=0) for f, v in fields.items()}
+            for i, pi in enumerate(pred_intervals.values()):
+                h = ax.fill_between(t, pi[0,:], pi[1,:], alpha=0.1, color=colors[i], label=interval)
+                handles.append(h)
+                pi_max = np.maximum(pi_max, np.nanmax(pi[1,:]))
 
+        
         return median_max, pi_max
     
     
@@ -211,25 +265,30 @@ class Model():
                       T_future=7*4,
                       ax=None,
                       obs=None,
-                      scale='lin'):
+                      scale='lin',
+                      **kwargs):
 
         ax = plt.axes(ax)
         
         # Plot posterior predictive for observed times
-        self.plot_samples(post_pred_samples, ax=ax, start=start, plot_fields=[variable])
+        median_max1, pi_max1 = self.plot_samples(post_pred_samples, ax=ax, start=start, plot_fields=[variable])
                 
         # Plot forecast
         T = self.horizon(post_pred_samples)
         obs_end = pd.to_datetime(start) + pd.Timedelta(T-1, "d")
         forecast_start = obs_end + pd.Timedelta("1d")
         
-        median_max, pi_max = self.plot_samples(forecast_samples,
-                                               start=forecast_start,
-                                               T=T_future,
-                                               ax=ax,
-                                               forecast=True,
-                                               legend=False,
-                                               plot_fields=[variable])
+        median_max2, pi_max2 = self.plot_samples(forecast_samples,
+                                                 start=forecast_start,
+                                                 T=T_future,
+                                                 ax=ax,
+                                                 forecast=True,
+                                                 legend=False,
+                                                 plot_fields=[variable],
+                                                 **kwargs)
+        
+        median_max = max(median_max1, median_max2)
+        pi_max = max(pi_max1, pi_max2)
         
         # Plot observation
         forecast_end = forecast_start + pd.Timedelta(T_future-1, "d")
