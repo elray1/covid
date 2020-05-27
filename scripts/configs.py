@@ -1,6 +1,7 @@
 import covid.models.SEIRD
 import covid.models.SEIRD_variable_detection
 import covid.models.SEIRD_incident
+import covid.models.SEIRD_incident_norw
 
 
 
@@ -49,7 +50,20 @@ less_rw_last_5 = {
     }
 }
 
-SEIRD_incident = {
-    'model' : covid.models.SEIRD_incident.SEIRD_incident,
-    'args'  : {}                # use defaults
+rw_last_1 = {
+    'model': covid.models.SEIRD_incident.SEIRD,
+    'args'  : {
+        'gamma_shape':  100,
+        'sigma_shape':  100,
+        'rw_scale': 1e-1,
+        'rw_use_last': 1
+    }
+}
+
+simstudy = {
+    'model': covid.models.SEIRD_incident_norw.SEIRD,
+    'args'  : {
+        'gamma_shape':  100,
+        'sigma_shape':  100
+    }
 }

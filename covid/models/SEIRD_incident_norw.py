@@ -34,11 +34,6 @@ class SEIRD(SEIRDBase):
                  det_prob_conc = 50.,
                  confirmed_dispersion=0.3,
                  death_dispersion=0.3,
-                 rw_scale = 2e-1,
-                 forecast_rw_scale = 0.,
-                 drift_scale = None,
-                 num_frozen=0,
-                 rw_use_last=1,
                  confirmed=None,
                  death=None):
 
@@ -76,11 +71,10 @@ class SEIRD(SEIRDBase):
         gamma = numpyro.sample("gamma",
                                     dist.Gamma(gamma_shape, gamma_shape * I_duration_est))
 
-
-        beta0 = numpyro.sample("beta0",
+        beta = numpyro.sample("beta",
                                dist.Gamma(beta_shape, beta_shape * I_duration_est/R0_est))
 
-        det_prob0 = numpyro.sample("det_prob0",
+        det_prob = numpyro.sample("det_prob",
                                    dist.Beta(det_prob_est * det_prob_conc,
                                             (1-det_prob_est) * det_prob_conc))
 
@@ -94,11 +88,6 @@ class SEIRD(SEIRDBase):
 
         death_rate = numpyro.sample("death_rate",
                                     dist.Gamma(10, 10 * 10))
-
-        if drift_scale is not None:
-            drift = numpyro.sample("drift", dist.Normal(loc=0, scale=drift_scale))
-        else:
-            drift = 0
 
 
         x0 = SEIRDModel.seed(N=N, I=I0, E=E0, H=H0, D=D0)
@@ -119,17 +108,15 @@ class SEIRD(SEIRDBase):
         
         # First observation
         with numpyro.handlers.scale(scale_factor=0.5):
-            y0 = observe_nb2("dy0", x0[6], det_prob0, confirmed_dispersion, obs=confirmed0)
+            y0 = observe_nb2("dy0", x0[6], det_prob, confirmed_dispersion, obs=confirmed0)
             
         with numpyro.handlers.scale(scale_factor=2.0):
             z0 = observe_nb2("dz0", x0[5], det_prob_d, death_dispersion, obs=death0)
 
-        params = (beta0,
+        params = (beta,
                   sigma,
                   gamma,
-                  rw_scale,
-                  drift,
-                  det_prob0,
+                  det_prob,
                   confirmed_dispersion,
                   death_dispersion,
                   death_prob,
@@ -139,7 +126,6 @@ class SEIRD(SEIRDBase):
         beta, det_prob, x, y, z = self.dynamics(T,
                                                 params,
                                                 x0,
-                                                num_frozen = num_frozen,
                                                 confirmed = confirmed,
                                                 death = death)
 
@@ -149,12 +135,10 @@ class SEIRD(SEIRDBase):
 
         if T_future > 0:
 
-            params = (beta[-rw_use_last:].mean(),
+            params = (beta,
                       sigma,
                       gamma,
-                      forecast_rw_scale,
-                      drift,
-                      det_prob[-rw_use_last:].mean(),
+                      det_prob,
                       confirmed_dispersion,
                       death_dispersion,
                       death_prob,
@@ -173,32 +157,18 @@ class SEIRD(SEIRDBase):
         return beta, x, y, z, det_prob, death_prob
     
     
-    def dynamics(self, T, params, x0, num_frozen=0, confirmed=None, death=None, suffix=""):
+    def dynamics(self, T, params, x0, confirmed=None, death=None, suffix=""):
         '''Run SEIRD dynamics for T time steps'''
 
-        beta0, \
+        beta, \
         sigma, \
         gamma, \
-        rw_scale, \
-        drift, \
-        det_prob0, \
+        det_prob, \
         confirmed_dispersion, \
         death_dispersion, \
         death_prob, \
         death_rate, \
         det_prob_d = params
-
-        rw = frozen_random_walk("rw" + suffix,
-                                num_steps=T-1,
-                                num_frozen=num_frozen)
-        
-        beta = numpyro.deterministic("beta", beta0 * np.exp(rw_scale*rw))
-        
-        det_prob = numpyro.sample("det_prob" + suffix,
-                                  LogisticRandomWalk(loc=det_prob0,
-                                                     scale=rw_scale,
-                                                     drift=0,
-                                                     num_steps=T-1))
 
         # Run ODE
         x = SEIRDModel.run(T, x0, (beta, sigma, gamma, death_prob, death_rate))

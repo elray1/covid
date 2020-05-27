@@ -13,6 +13,8 @@ if __name__ == "__main__":
     parser.add_argument('--config', help='model configuration name', default='SEIRD')
     
     args = parser.parse_args()
+    print(args.config)
+    print(str(dir(configs)))
 
     if args.config not in dir(configs):
         print(f'Invalid config: {args.config}. Options are {dir(configs)}')
